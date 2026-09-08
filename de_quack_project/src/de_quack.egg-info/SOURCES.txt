@@ -2,6 +2,7 @@ LICENSE
 README.md
 pyproject.toml
 src/de_quack/__init__.py
+src/de_quack/arrow.py
 src/de_quack/core.py
 src/de_quack/exceptions.py
 src/de_quack/utilities.py
@@ -11,3 +12,5 @@ src/de_quack.egg-info/SOURCES.txt
 src/de_quack.egg-info/dependency_links.txt
 src/de_quack.egg-info/requires.txt
 src/de_quack.egg-info/top_level.txt
+src/de_quack/gene_tables/human_genes.parquet
+src/de_quack/gene_tables/mouse_genes.parquet

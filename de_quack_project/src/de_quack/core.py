@@ -26,7 +26,7 @@ import datetime
 import polars as pl
 from typing import TypeAlias
 from .exceptions import ProcessingError, DuplicateExperimentError, DuplicateGeneTableError, DeQuackError
-from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, _setup_logger
+from .utilities import gene_columns, ExperimentMetadata, CORE_QUERIES, _setup_logger, _try_process_metadata
 import time
 import importlib
 core_queries = CORE_QUERIES
@@ -36,6 +36,7 @@ ExperimentId: TypeAlias = int
 ExperimentMetadataField: TypeAlias = str | int | float | bool | None | dict[str, object] | list[object]
 ExperimentMetadataRecord: TypeAlias = dict[str, ExperimentMetadataField]
 ExperimentMetadataMap: TypeAlias = dict[ExperimentId, ExperimentMetadataRecord]
+MetadataInput: TypeAlias = dict|list[dict]|str|pl.DataFrame| None
 
 _GENE_ALIAS_TO_COLUMN = {
     alias.lower(): canonical
@@ -45,7 +46,8 @@ _GENE_ALIAS_TO_COLUMN = {
 
 logger = _setup_logger()
 
-
+#make excel sheet parsing
+#add more parsing compatibility for metadata
 
 class DeQuackling:
     def __init__(self, db_path: str = 'SQL.duckdb') -> None:
@@ -257,6 +259,16 @@ class DeQuackling:
                 self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
                 self.conn.read_parquet(info).create_view('preprocessed_data')
                 return
+            elif info.lower().endswith('xls') or info.lower().endswith('xlsx'):
+                try:
+                    import openpyxl
+                except ImportError:
+                    raise ImportError('openpyxl is required to read Excel files. Please install it with `pip install openpyxl`.')
+                self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
+                df = pl.read_excel(info, sheet_name=0)
+                self.conn.register('info', df.to_arrow())
+                self.conn.execute('CREATE TEMP VIEW preprocessed_data AS SELECT * FROM info')
+                return
             else:
                 self.conn.execute('DROP VIEW IF EXISTS preprocessed_data')
                 self.conn.from_csv_auto(info, header=True).create_view("preprocessed_data")
@@ -464,7 +476,7 @@ class DeQuackling:
     def ingest(
         self,
         info: object,
-        metadata: ExperimentMetadataRecord | None = None,
+        metadata: MetadataInput | None = None,
         species: str = 'human',
         columns: dict[str, str] | None = None,
         **kwargs: ExperimentMetadataField,
@@ -472,10 +484,14 @@ class DeQuackling:
         """Normalize and ingest differential expression results into DuckDB.
 
         Args:
-            metadata: Experiment metadata for the ingested table.
+            metadata: Experiment metadata for the ingested table. Can be a dictionary, a string path to a JSON or CSV file, or a polars or pandas DataFrame.
             columns: Optional explicit column remapping for gene fields.
             **kwargs: Additional metadata fields merged into `metadata`.
         """
+        _try_process_metadata(metadata)
+        if isinstance(metadata, list) and len(metadata) > 1:
+            logger.warning('Multiple metadata records provided. Only the first will be used for this insertion.')
+        metadata = metadata[0] if isinstance(metadata, list) else metadata
         if columns is None:
             columns = {}
         if metadata is None:

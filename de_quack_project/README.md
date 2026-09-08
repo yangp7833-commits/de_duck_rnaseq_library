@@ -26,6 +26,14 @@ Optional plotting extras:
 ```bash
 pip install "de_quack[plotting]"
 ```
+## Changes from V1
+
+- The library has been refactored to use Polars as the main data engine, replacing Pandas. This change improves performance and memory efficiency, especially for large datasets.
+- The previous reticulate bridge has been removed, and the library is now fully implemented in Python. This simplifies the codebase and reduces dependencies.
+- The `DeArrow` and `DeArrows` classes have been introduced to represent single and multiple experiments, respectively. These classes provide a more intuitive interface for working with DE results. They are also built on the Polars Dataframe, which allows for efficient data manipulation and querying.
+- The `DeQuackling` class has been updated to work with the new Polars-based data model. It now provides methods for ingesting, querying, and managing DE results in a DuckDB database.
+- The `volcano_plot` function has been updated to work with Polars DataFrames, and it now supports additional customization options for plotting.
+- The library now includes improved error handling and input validation, ensuring that users receive informative messages when issues arise.
 
 ## Supported inputs
 
@@ -36,7 +44,10 @@ The library accepts many table-like objects and file paths:
 - Polars DataFrames
 - Polars LazyFrames
 - DuckDB relations
+- Excel files (xlsx) 
 - `DeArrow` and `DeArrows` objects
+
+With version 2.1, the library now supports CSV, TSV, and JSON files for metadata input along with Polars and pandas Dataframes. 
 
 Note: Although these input types are supported, they are detected by first trying an import of the relevant library and then checking the type of the object. Therefore, even though Pandas is supported, it is not a dependency.
 ## Core data model
@@ -148,7 +159,7 @@ with DeQuackling("results.duckdb") as db:
 
 Represents a single experiment as a Polars-backed table with an attached experiment metadata map.
 
-`DeArrow(info, experiment_id=None, metadata=None, heal_genes=False, species=None, columns=None, **fields)`
+`DeArrow(info, experiment_id=None, metadata=None, heal_genes=False, species=None, columns=None, ignore_errors=False, **fields)`
 
 Important methods:
 
@@ -182,7 +193,7 @@ print(sig.df().head())
 
 Represents multiple experiments as one combined Polars-backed table while maintaining per-experiment metadata.
 
-`DeArrows(*args, columns=None, metadata=None, ids=None, keep_ids=False, heal_genes=False, species="human")`
+`DeArrows(*args, columns=None, metadata=None, ids=None, keep_ids=False, heal_genes=False, species="human", ignore_errors=False)`
 
 Important methods:
 

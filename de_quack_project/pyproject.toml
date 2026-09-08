@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "de_quack"
-version = "0.1.2"
+version = "2.0.0"
 description = "Python library for differential expression data storage and visualization using DuckDB."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["duckdb", "differential expression", "bioinformatics", "visualization", "data management", "rnaseq"]
 authors = [
@@ -29,11 +29,7 @@ classifiers = [
 
 dependencies = [
   "duckdb>=1.0",
-  "pandas>=1.0",
-  "numpy>=1.20",
   "polars>=1.0",
-  "matplotlib>=3.0",
-  "adjustText>=0.7"
 ]
 
 [project.optional-dependencies]
@@ -41,7 +37,11 @@ plotting = ["matplotlib>=3.5.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["de_quack*", "src/de_quack/gene_tables/*.parquet"]
 
 [tool.setuptools.package-data]
-"*" = ["*.py"]
+de_quack = ["gene_tables/*.parquet"]
+
+[tool.setuptools]
+include-package-data = true
+
+

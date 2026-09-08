@@ -207,6 +207,38 @@ def _find_date_and_file(info):
             else:
                 return datetime.datetime.now().strftime('%Y-%m-%d'), file_path
 
+def _process_metadata(metadata: object):
+    if isinstance(metadata, dict) or isinstance(metadata, list):
+        return metadata
+    
+    import polars as pl
+    if isinstance(metadata, pl.DataFrame):
+        return metadata.to_dicts()
+    try:
+        import pandas as pd
+        if isinstance(metadata, pd.DataFrame):
+            return metadata.to_dict(orient='records')
+    except ImportError:
+        pass
+    
+    if isinstance(metadata, str):
+        if not os.path.isfile(metadata):
+            raise FileNotFoundError(f'File not found: {metadata}')
+        if metadata.lower().endswith('.json'):
+            with open(metadata, 'r') as f:
+                return json.load(f)
+        else:
+            with open(metadata, 'r') as f:
+                line = f.readline()
+                separator = '\t' if '\t' in line else (';' if ';' in line else ',')
+            df = pl.read_csv(metadata, separator=separator, null_values = ['', 'NA', 'NaN', 'nan'])
+            return df.to_dicts()
+
+def _try_process_metadata(metadata: object):
+    try:
+        return _process_metadata(metadata)
+    except (FileNotFoundError, json.JSONDecodeError, pl.exceptions.ComputeError) as e:
+        raise ProcessingError(f"Error processing metadata: {e}")
 
 @dataclass
 class ExperimentMetadata:

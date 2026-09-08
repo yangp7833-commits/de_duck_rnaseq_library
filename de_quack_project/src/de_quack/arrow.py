@@ -11,8 +11,10 @@ import polars as pl
 from typing import Sequence, TypeAlias
 from .core import DeQuackling, experiment_columns
 from .exceptions import DeQuackError, ProcessingError, DuplicateGeneTableError
-from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES, _setup_logger
+from .utilities import ExperimentMetadata, gene_columns,  CORE_QUERIES, _setup_logger, _try_process_metadata
 logger = _setup_logger()
+
+
 
 
 _core_queries = CORE_QUERIES
@@ -27,6 +29,7 @@ ExperimentId: TypeAlias = int
 ExperimentMetadataField: TypeAlias = str | int | float | bool | None | dict[str, object] | list[object]
 ExperimentMetadataRecord: TypeAlias = dict[str, ExperimentMetadataField]
 ExperimentMetadataMap: TypeAlias = dict[ExperimentId, ExperimentMetadataRecord]
+MetadataInput: TypeAlias = dict|list[dict]|str|pl.DataFrame| None
 MetadataTableSource: TypeAlias = pl.DataFrame | pl.LazyFrame | str | dict[str, object] | list[dict[str, object]]
 
 
@@ -45,7 +48,8 @@ def _clean_df(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def _to_polars_table(table: object) -> pl.DataFrame:
+
+def _to_polars_table(table: object, ignore_errors: bool = False) -> pl.DataFrame:
     """
     Convert various table-like objects to a polars DataFrame.
     Accepts polars DataFrames, polars LazyFrames, pandas DataFrames, file paths (CSV, TSV, Parquet), dictionaries, and lists of dictionaries.
@@ -70,13 +74,19 @@ def _to_polars_table(table: object) -> pl.DataFrame:
             raise FileNotFoundError(f'File not found: {path}')
         if path.lower().endswith('.parquet'):
             return pl.read_parquet(path)
+        if path.lower().endswith('xls') or path.lower().endswith('xlsx'):
+            try:
+                import openpyxl
+            except ImportError:
+                raise ImportError('openpyxl is required to read Excel files. Please install it with `pip install openpyxl`.')
+            return pl.read_excel(path, sheet_name=0)
         try:
-            with open(path, 'r', encoding='utf-8') as handle:
-                first_line = handle.readline()
+            with open(path, 'r', encoding='utf-8') as f:
+                first_line = f.readline()
         except Exception as e:
-            raise FileNotFoundError(f'Error reading file: {path}') from e
+            raise ProcessingError(f"Error occurred while reading the file: {e}")
         separator = '\t' if '\t' in first_line else (';' if ';' in first_line else ',')
-        return pl.read_csv(path, separator=separator, null_values = ['', 'NA', 'NaN', 'nan'])
+        return pl.read_csv(path, separator=separator, null_values = ['', 'NA', 'NaN', 'nan'], truncate_ragged_lines=ignore_errors, quote_char = None)
 
     if isinstance(table, dict):
         return pl.DataFrame(table)
@@ -225,10 +235,11 @@ class DeArrow:
         self,
         info: object,
         experiment_id: ExperimentId | None = None,
-        metadata: ExperimentMetadataRecord | None = None,
+        metadata: MetadataInput | None = None,
         heal_genes: bool = False,
         species: str | None = None,
         columns: dict[str, str] | None = None,
+        ignore_errors: bool = False,
         **fields: ExperimentMetadataField,
     ) -> None:
         """
@@ -240,8 +251,9 @@ class DeArrow:
             The object should have columns for gene identifiers and expression values.
         experiment_id : ExperimentId, optional
             An integer ID for the experiment. If not provided, defaults to 1.
-        metadata : ExperimentMetadataRecord, optional
-            A dictionary containing metadata for the experiment. If not provided, metadata can be provided as keyword arguments.
+        metadata : MetadataInput, optional
+            A dictionary containing metadata for the experiment. If not provided, metadata can be provided as keyword arguments. Metadata can also be provided as a string path to a JSON or CSV file, or as a polars or pandas DataFrame. 
+            If no metadata is provided, an error will be raised.
         heal_genes : bool, optional
         If True, attempts to heal gene identifiers. Defaults to False.
         species : str, optional
@@ -250,12 +262,20 @@ class DeArrow:
             A dictionary mapping column names to their expected types.
         **fields : ExperimentMetadataField
             Additional metadata fields as keyword arguments.
+        ignore_errors : bool, optional
+            Option to ignore errors when processing CSVs and TSVs. This is done by turning on the truncate_ragged_lines option in polars. Default is False.
+            This option is only available in DeArrow/DeArrows initialization and is not available in the add_experiment method. This is because the add_experiment method is primarily used for adding DeArrow or DeArrows objects, which are already processed and do not require this option.
+            If you want to ignore errors when adding a new experiment, please initialize the DeArrow or DeArrows object with ignore_errors set to True before adding it to the existing DeArrow object.
         Raises if no metadata is provided or if it is not a dictionary.
         """
         if columns is None:
             columns = {}
         if metadata is None:
             metadata = fields
+        metadata = _try_process_metadata(metadata)
+        if isinstance(metadata, list) and len(metadata) > 1:
+            logger.warning('Multiple metadata records provided. Only the first will be used for this DeArrow object.')
+        metadata = metadata[0] if isinstance(metadata, list) else metadata
         if len(metadata) == 0:
             raise ProcessingError('No metadata provided in de_arrow object')
         
@@ -264,7 +284,7 @@ class DeArrow:
         
         if not isinstance(metadata, dict):
             raise ProcessingError('Metadata must be a dictionary')
-        self._table, self.experiment_metadata = self.__class__._to_de_arrow(info, metadata, columns, experiment_id, heal_genes = heal_genes, species = species)
+        self._table, self.experiment_metadata = self.__class__._to_de_arrow(info, metadata, columns, experiment_id, heal_genes = heal_genes, species = species, ignore_errors = ignore_errors)
         self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', experiment_id)
         self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', experiment_id)
         self.contrast = _get_experiment_attribute(self.experiment_metadata, 'contrast', experiment_id)
@@ -282,12 +302,16 @@ class DeArrow:
         experiment_id: ExperimentId | None = None,
         heal_genes: bool = False,
         species: str | None = None,
+        ignore_errors: bool = False,
     ) -> tuple[pl.DataFrame, ExperimentMetadataMap]:
         """
         Convert a table-like object and metadata into a DeArrow-compatible polars DataFrame and metadata map.
         First converts metadata into an ExperimentMetadata object, then converts the table-like object into a polars DataFrame, orders the columns, heals gene identifiers if specified, and returns the cleaned DataFrame along with the metadata map.
         """
-        df = _to_polars_table(info)
+        try:
+            df = _to_polars_table(info, ignore_errors=ignore_errors)
+        except Exception as e:
+            raise ProcessingError(f"Error occurred while converting info to polars table: {e}")
         metadata_fields, other_info=ExperimentMetadata().to_dict(metadata, info)
         for key, value in json.loads(other_info).items():
             metadata_fields[key]=value
@@ -457,7 +481,7 @@ class DeArrow:
     def add_experiment(
         self,
         data: object,
-        metadata: ExperimentMetadataRecord | None = None,
+        metadata: MetadataInput | None = None,
         experiment_id: ExperimentId | None = None,
         **fields: ExperimentMetadataField,
     ) -> "DeArrows":
@@ -468,6 +492,7 @@ class DeArrow:
         """
 
         ids = [self.id]
+        metadata = _try_process_metadata(metadata)
         if metadata is None and fields:
             metadata = fields 
         if isinstance(data, DeArrow):
@@ -534,6 +559,7 @@ class DeArrows:
         keep_ids: bool = False,
         heal_genes: bool = False,
         species: str = 'human',
+        ignore_errors: bool = False,
     ) -> object:
         """
         Checks if there are multiple metadata and provided tables. If there is only one metadata and one table, it will return a DeArrow object instead of a DeArrows object.
@@ -542,6 +568,7 @@ class DeArrows:
             columns = {}
         if metadata is None:
             return super().__new__(cls)
+        _try_process_metadata(metadata)
         if len(metadata) != len(args):
             if len(args) == 1 and isinstance(metadata, dict):
                 return DeArrow(args[0], metadata=metadata)
@@ -558,6 +585,7 @@ class DeArrows:
         heal_genes: bool = False,
         species: str = 'human',
         keep_ids: bool = False,
+        ignore_errors: bool = False,
     ) -> None:
         if columns is None:
             columns = {}
@@ -567,8 +595,9 @@ class DeArrows:
         ----------
         *args : str or file paths
             Variable length argument list of table references (file paths or identifiers)
-        metadata : list of dict
-            List of metadata dictionaries, one for each table.
+        metadata : MetadataInput, optional
+            Can be a list of dictionaries, a string path to a JSON or CSV file, or a polars or pandas DataFrame. Each dictionary should contain metadata for the corresponding table in args. If no metadata is provided, an error will be raised.
+            Metadata for each table. Note that since this is DeArrows, the top JSON object in the JSON file must be a JSON array.
         ids : list of int, optional
             List of unique identifiers for each table. If not provided, will be generated automatically.
         heal_genes : bool, optional
@@ -581,6 +610,8 @@ class DeArrows:
             If no ids are provided, new ids will be generated automatically. Default is False.
         species : str, optional
             The species to use for gene healing. Default is 'human'. If heal_genes is True, this parameter is required to specify the species for gene healing. If heal_genes is False, this parameter is ignored.
+        ignore_errors : bool, optional
+            Option to ignore errors when processing CSVs and TSVs. This is done by turning on the truncate_ragged_lines option in polars. Default is False.
         
         If a provided table already has an experiment_id column and it is NOT a DeArrow or DeArrows object, the id will be discarded. This is because maintaing equal lengths between the id and tables with keep_ids on is not possible when the id is already present in the table. 
         If you want to keep the id, please provide a DeArrow or DeArrows object instead of a table with an experiment_id column.
@@ -620,7 +651,7 @@ class DeArrows:
         _check_ids(ids)
         
         
-        self._table, self.experiment_metadata, ids = self.__class__._from_tables(*args, metadata=metadata, ids=ids, columns=columns, heal_genes = heal_genes, species = species, keep_ids = keep_ids)
+        self._table, self.experiment_metadata, ids = self.__class__._from_tables(*args, metadata=metadata, ids=ids, columns=columns, heal_genes = heal_genes, species = species, keep_ids = keep_ids, ignore_errors = ignore_errors)
         self.id = ids
         self.name = _get_experiment_attribute(self.experiment_metadata, 'experiment_name', ids)
         self.annotation_version = _get_experiment_attribute(self.experiment_metadata, 'annotation_version', ids)
@@ -682,6 +713,7 @@ class DeArrows:
         heal_genes: bool = False,
         species: str = 'human',
         keep_ids: bool = False,
+        ignore_errors: bool = False,
     ) -> tuple[pl.DataFrame, ExperimentMetadataMap, list[ExperimentId]]:
         table = pl.DataFrame(schema = {'experiment_id': pl.Int32(), 'gene_symbol': pl.String(), 'ensembl_id': pl.String(), 'log2fc': pl.Float64(), 'logCPM': pl.Float64(), 'pvalue': pl.Float64(), 'padj': pl.Float64(), 'stat': pl.Float64(), 'other_info': pl.String()})
         frames = []
@@ -707,7 +739,10 @@ class DeArrows:
                     meta_by_id[new_id] = arg.experiment_metadata[old_id]
             else:
                 new_id = next(ids_iter)
-                arg = _to_polars_table(arg)
+                try:
+                    arg = _to_polars_table(arg, ignore_errors=ignore_errors)
+                except Exception as e:
+                    raise ProcessingError(f"Error occurred while converting info to polars table: {e}")
                 arg = _order_columns(arg, columns)
                 if 'experiment_id' in arg.columns:
                     arg = arg.drop('experiment_id')
@@ -945,7 +980,7 @@ class DeArrows:
     def add_experiment(
         self,
         data: object,
-        metadata: ExperimentMetadataRecord | None = None,
+        metadata: MetadataInput | None = None,
         experiment_id: ExperimentId | None = None,
         **fields: ExperimentMetadataField,
     ) -> "DeArrows":
@@ -954,6 +989,7 @@ class DeArrows:
         The new experiment will be added to the existing DeArrows object and a new DeArrows object will be returned.
         Uses functions outside of the class.
         """
+        metadata = _try_process_metadata(metadata) if metadata is not None else None
         meta = dict(self.experiment_metadata)
         if metadata is not None and fields:
             metadata.update(fields)
